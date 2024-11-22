@@ -4,9 +4,8 @@ from dotenv import load_dotenv
 import os
 import numpy as np
 
-load_dotenv()  # 加载.env文件
+load_dotenv() 
 
-# 现在可以使用CUDA_VISIBLE_DEVICES
 cuda_devices = os.getenv('CUDA_VISIBLE_DEVICES')
 print(f'CUDA Device: {cuda_devices}')
 
@@ -85,18 +84,15 @@ def get_embedding_and_labels(
                 delete_index.append(i)
                 continue
             outputs = model(**inputs, output_hidden_states=True)
+            
             #hidden_states: (layer, batch_size, seq_len, hidden_size)
             hidden_states = torch.stack(outputs["hidden_states"][1:]).transpose(0,1)
-            # embeddings.extend(hidden_states[layer_range[0]:layer_range[1], :, token_range[0]:token_range[1], :].cpu())
             embeddings.extend(hidden_states[:, :, token_range[0]:token_range[1], :].cpu())
 
     embeddings_to_save = torch.stack(embeddings)
     embeddings_to_save = embeddings_to_save.transpose(0,1)
     labels = [label for i, label in enumerate(labels) if i not in delete_index]
     print(f"delete {len(delete_index)} samples, with index: {delete_index}")
-    # if file_to_save != "":
-    #     print(f"save embedding to {file_to_save}...")
-    #     pickle.dump(embeddings_to_save, open(file_to_save, "wb"))
         
     return embeddings_to_save, labels
 
