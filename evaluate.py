@@ -79,17 +79,6 @@ def get_signs(hidden_states, directions,train_labels, n_components):
     
     return signs
 
-# def shuffle_all_train_choices(train_data, train_labels, seed):
-#     random.seed(seed)
-#     shuffled_train_labels = []
-#     for i in range(len(train_data)):
-#         is_shuffled = random.random() < 0.5
-#         if is_shuffled:
-#             train_data[i] = train_data[i][::-1]
-#             train_labels[i] = train_labels[i][::-1]
-#         shuffled_train_labels.append(train_labels[i])
-#     return train_data, shuffled_train_labels
-
 def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, is_random=True):
     train_emb_true_index = [
         i for i, label in enumerate(train_labels) if label >= high_bound]
@@ -111,15 +100,8 @@ def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, i
     train_emb = []
     for i in range(n_pair):
         train_emb_index.extend([train_emb_true_index[i],train_emb_false_index[i]])
-        # train_emb.append(embeddings[train_emb_true_index[i]])
-        # train_emb.append(embeddings[train_emb_false_index[i]])
-    train_labels = [[1, 0]] * n_pair
-    # train_labels = [1, 0] * n_pair
 
-    # shuffle emb and labels
-    # train_emb_index, train_labels = shuffle_all_train_choices(train_emb_index, train_labels, seed=0)
-    # train_emb_index = np.array(train_emb_index).flatten()
-    # (sample, layer, token, dim)
+    train_labels = [[1, 0]] * n_pair
     train_emb = embeddings[train_emb_index, :, :, :]
     return train_emb, train_labels
 
