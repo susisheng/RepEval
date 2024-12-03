@@ -1,101 +1,25 @@
 #%% set up environment
 import os
 from dotenv import load_dotenv
-import os
-import numpy as np
 
-load_dotenv() 
-
-cuda_devices = os.getenv('CUDA_VISIBLE_DEVICES')
-print(f'CUDA Device: {cuda_devices}')
-
+# load_dotenv() 
+# cuda_devices = os.getenv('CUDA_VISIBLE_DEVICES')
+# print(f'CUDA Device: {cuda_devices}')
 #%%
 import json
 import pickle
 import torch
+import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
-#%% Utils
-def load_file(file_path):
-    if file_path.endswith(".json"):
-        with open(file_path, "r") as f:
-            return json.load(f)
-    elif file_path.endswith(".pkl"):
-        return pickle.load(open(file_path, "rb"))
-#%% Get Prompt
-def load_prompt_template(prompt_template_file):
-    with open(prompt_template_file, "r") as f:
-        prompt_template = f.read()
-    return prompt_template
+#%% 
+from utils import load_file
+import importlib
+import get_prompt_label
+importlib.reload(get_prompt_label)
+from get_prompt_label import get_prompts_labels
 
-def is_prompt_template_valid(eval_type, prompt_template):
-    """Check if the prompt template is valid."""
-    if eval_type == "pairwise":
-        if "{response_A}" not in prompt_template or "{response_B}" not in prompt_template:
-            return False
-    return True 
-
-def get_pairwise_prompt(prompt_template, contents):
-    """contents contains response_A and response_B. The function switch the order of response_A and response_B and get two prompts. Therefore, in training, make sure A is better than B."""
-    prompt_AB = prompt_template.format(**contents)
-    # switch A and B
-    contents["response_A"], contents["response_B"] = contents["response_B"], contents["response_A"]
-    prompt_BA = prompt_template.format(**contents)
-    return prompt_AB, prompt_BA
-
-def get_absolute_prompt(prompt_template, contents):
-    return prompt_template.format(**contents)
-
-def get_prompt(eval_type, prompt_template, contents):
-    if eval_type == "pairwise":
-        return get_pairwise_prompt(prompt_template, contents)
-    elif eval_type == "absolute":
-        return get_absolute_prompt(prompt_template, contents)
-    else:
-        raise ValueError("Invalid eval_type.")
-
-def get_prompts(eval_type, prompt_template, contents_list):
-    prompts = []
-    for contents in contents_list:
-        if eval_type == "pairwise":
-            prompts.extend(get_prompt("pairwise", prompt_template, contents))
-        elif eval_type == "absolute":
-            prompts.append(get_prompt("absolute", prompt_template, contents))
-        else:
-            raise ValueError("Invalid eval_type.")
-    return prompts
-
-#%% Utils
-def get_embedding_and_labels(
-    model, tokenizer, prompts, labels, batch_size=-1, max_length=2048, token_range=[-1,None]
-    ):
-    if batch_size == -1:
-        batch_size = len(prompts)
-    embeddings = []
-    delete_index = []
-    with torch.no_grad():
-        print("calcu embedding...")
-        cnt = 0
-        for i in tqdm(range(0, len(prompts), batch_size)):
-            cnt += 1
-            input_texts = prompts[i: i + batch_size]
-            inputs = tokenizer(input_texts, padding=True, truncation=True, return_tensors="pt")
-            if inputs["input_ids"].size(-1) > max_length:
-                delete_index.append(i)
-                continue
-            outputs = model(**inputs, output_hidden_states=True)
-            
-            #hidden_states: (layer, batch_size, seq_len, hidden_size)
-            hidden_states = torch.stack(outputs["hidden_states"][1:]).transpose(0,1)
-            embeddings.extend(hidden_states[:, :, token_range[0]:token_range[1], :].cpu())
-
-    embeddings_to_save = torch.stack(embeddings)
-    embeddings_to_save = embeddings_to_save.transpose(0,1)
-    labels = [label for i, label in enumerate(labels) if i not in delete_index]
-    print(f"delete {len(delete_index)} samples, with index: {delete_index}")
-        
-    return embeddings_to_save, labels
-
+#%% Load model and tokenizer
 def get_model_tokenizer(model_name_or_path, max_length=2048):
     print("Load Model")
     model = AutoModelForCausalLM.from_pretrained(
@@ -108,8 +32,85 @@ def get_model_tokenizer(model_name_or_path, max_length=2048):
     print("Load Model Done")
     return model, tokenizer
 
+#%% tokenization
+def get_tokenized_prompts(tokenizer, prompts, max_length=2048, batch_size=-1):
+    tokenized_inputs = []
+    exceed_max_length = [False] * len(prompts)
+    if batch_size == -1:
+        batch_size = len(prompts)
+    
+    # tokenization
+    for i in tqdm(range(0, len(prompts), batch_size)):
+        input_texts = prompts[i: i + batch_size]
+        inputs = tokenizer(input_texts, padding=True, truncation=True, return_tensors="pt")
+        if inputs["input_ids"].size(-1) > max_length:
+            exceed_max_length[i: i + batch_size] = [True] * len(input_texts)
+        tokenized_inputs.append(inputs)
+    
+    # warning if some inputs exceed max_length
+    if any(exceed_max_length):
+        print(f"Warning: {sum(exceed_max_length)} samples exceed max_length.")
+    return tokenized_inputs, exceed_max_length
+
+#%% Get embedding
+def get_embedding(model, tokenizer, tokenized_inputs=None, prompts=None, batch_size=-1, token_range=[-1,None]):
+    assert tokenized_inputs is not None or prompts is not None
+    if tokenized_inputs is None:
+        if batch_size == -1:
+            batch_size = len(prompts)
+        tokenized_inputs, _ = get_tokenized_prompts(tokenizer, prompts, batch_size=batch_size)
+    embeddings = []
+    with torch.no_grad():
+        print("calcu embedding...")
+        for inputs in tqdm(tokenized_inputs):
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            outputs = model(**inputs, output_hidden_states=True)
+            # hidden_states: (layer, batch_size, seq_len, hidden_size)
+            hidden_states = torch.stack(outputs["hidden_states"][1:]).transpose(0,1)
+            embeddings.extend(hidden_states[:, :, token_range[0]:token_range[1], :].cpu())
+    embeddings_to_save = torch.stack(embeddings)
+    return embeddings_to_save.numpy()
+
+#%% Prepare representation and labels
+def get_embedding_and_labels(model, tokenizer, prompts, labels, eval_type, batch_size=-1, max_length=2048, token_range=[-1,None]):
+    tokenized_inputs, exceed_max_length = get_tokenized_prompts(tokenizer, prompts, max_length=max_length, batch_size=batch_size)
+    # drop samples that exceed max_length
+    if eval_type == "absolute":
+        delete_index = [i for i, exceed in enumerate(exceed_max_length) if
+                        exceed]
+    elif eval_type == "pairwise":
+        for i in range(0, len(exceed_max_length), 2):
+            if exceed_max_length[i] or exceed_max_length[i+1]:
+                exceed_max_length[i], exceed_max_length[i+1] = True, True
+        delete_index = [i for i, exceed in enumerate(exceed_max_length) if exceed]
+    else:
+        raise ValueError("Invalid eval_type.")
+    
+    tokenized_inputs = [tokenized_inputs[i] for i in range(len(tokenized_inputs)) if i not in delete_index]
+    labels = [label for i, label in enumerate(labels) if i not in delete_index]
+    embeddings = get_embedding(model, tokenizer, tokenized_inputs=tokenized_inputs, token_range=token_range)
+    return embeddings, labels
+
+#%% Save representation and labels
+def save_representations_and_labels(representations, labels, rep_label_dir, config=None):
+    if not os.path.exists(rep_label_dir):
+        os.makedirs(rep_label_dir)
+    rep_file_path = os.path.join(rep_label_dir, "embedding.pkl")
+    label_file_path = os.path.join(rep_label_dir, "labels.pkl")
+    # save rep and label
+    print(f"save embedding to {rep_file_path}...")
+    pickle.dump(representations, open(rep_file_path, "wb"))
+    print(f"save labels to {label_file_path}")
+    pickle.dump(labels, open(label_file_path, "wb"))
+    # save config
+    if config is not None:
+        config_path = os.path.join(rep_label_dir, "config.json")
+        print(f"save config to {config_path}")
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=4)
+
 #%% Get Representation
-def get_representation_labels(config, model=None, tokenizer=None):
+def load_rep_label(config, model=None, tokenizer=None):
     # path config
     rep_label_dir = config.get("rep_label_dir", "")
     rep_file_path, label_file_path = "", ""
@@ -128,9 +129,20 @@ def get_representation_labels(config, model=None, tokenizer=None):
                 labels = np.array(labels)
             print(f"load embedding from {rep_file_path}...")
             return pickle.load(open(rep_file_path, "rb")), labels
+        # if could not find embedding.pkl and labels.pkl, try add prompt template and model_name to file path
+        else:
+            prompt_template_file = config.get("prompt_template_file", "")
+            prompt_template_name = os.path.basename(prompt_template_file).split(".")[0]
+            rep_label_dir = os.path.join(rep_label_dir, prompt_template_name, model.name_or_path.replace("/", "_"))
+            if not os.path.exists(rep_label_dir):
+                os.makedirs(rep_label_dir)
+            rep_file_path = os.path.join(rep_label_dir, "embedding.pkl")
+            label_file_path = os.path.join(rep_label_dir, "labels.pkl")
     
-    # Load model and tokenizer
-    if model is None or tokenizer is None:
+    # Else, load model and tokenizer
+    if model is None or tokenizer is None or model.name_or_path != config["model_name_or_path"]:
+        if model is not None and model.name_or_path != config["model_name_or_path"]:
+            print(f"Warning: model name mismatch. Load model from {config['model_name_or_path']}")
         model_name_or_path = config["model_name_or_path"]
         max_length = config.get("max_length", 2048)
         model, tokenizer = get_model_tokenizer(
@@ -140,43 +152,31 @@ def get_representation_labels(config, model=None, tokenizer=None):
     eval_type = config["eval_type"]
     assert eval_type in ["pairwise", "absolute"]
     
-    # Prompt template
-    prompt_template_file = config["prompt_template"]
-    prompt_template = load_prompt_template(prompt_template_file)
-    if not is_prompt_template_valid(eval_type, prompt_template):
-        raise ValueError("Prompt template is not valid.")
-    
-    # Load contents
-    content_file = config["content_file"]
-    content_list = load_file(content_file)
-    prompts = get_prompts(eval_type, prompt_template, content_list)
-    
-    # Prepare labels
-    if eval_type == "absolute":
-        labels = [content["label"] for content in content_list]
-    elif eval_type == "pairwise":
-        labels = []
-        for content in content_list:
-            # here label should be 'A' or 'B'
-            assert content["label"] in ["A", "B"]
-            labels.extend([1,0] if content["label"] == "A" else [0,1])
+    # Load prompts and labels
+    prompts, labels = get_prompts_labels(
+        eval_type=eval_type, 
+        content_file=config["content_file"],
+        prompt_template_file=config["prompt_template_file"]
+    )
             
     # Get Representation
-    # layer_range = config.get("layer_range", [-1, None])
     token_range = config.get("token_range", [-1, None])
-    
     batch_size = config.get("batch_size", 1)
     representations, labels = get_embedding_and_labels(
-        model, tokenizer, prompts, labels, 
-        # layer_range=layer_range,
-        token_range=token_range, 
-        batch_size=batch_size)
+        model, tokenizer, prompts, labels, eval_type, batch_size=batch_size, token_range=token_range)
     
     if rep_label_dir != "":
+        # save embedding and labels
         print(f"save embedding to {rep_file_path}...")
         pickle.dump(representations, open(rep_file_path, "wb"))
         print(f"save labels to {label_file_path}")
         pickle.dump(labels, open(label_file_path, "wb"))
+        
+        # save config
+        config_path = os.path.join(rep_label_dir, "config.json")
+        print(f"save config to {config_path}")
+        with open(config_path, "w") as f:
+            json.dump(config, f)
     
     return_embedding = config.get("return_embedding", rep_file_path == "")
     if return_embedding:
@@ -186,12 +186,12 @@ def get_representation_labels(config, model=None, tokenizer=None):
 if __name__ == "__main__":
     # from config import config
     config = {
-        "model_name_or_path": "meta-llama/Meta-Llama-3-8B",
+        "model_name_or_path": "mistralai/Mistral-7B-Instruct-v0.2",
         "eval_type": "absolute",
         "content_file": "data/example.json",
         "prompt_template": "prompts/entail.txt",
         "rep_label_dir": "./data/representations/entailment",
         "return_embedding": True
     }
-    model, tokenizer = get_model_tokenizer("meta-llama/Meta-Llama-3-8B")
-    results = get_representation_labels(config, model, tokenizer)
+    model, tokenizer = get_model_tokenizer("mistralai/Mistral-7B-Instruct-v0.2")
+    results = load_rep_label(config, model, tokenizer)

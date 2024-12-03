@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
-from get_representation import get_representation_labels
+from get_representation import load_rep_label
 
 def recenter(x, mean=None):
     if mean is None:
@@ -20,7 +20,9 @@ def project_onto_direction(H, direction, H_mean = None):
     if H_mean is not None:
         H = H - H_mean
     assert not np.isinf(mag)
-    return H.dot(direction) / mag
+    X =  H.dot(direction) 
+    X /= mag
+    return X
     # return H.matmul(direction) / mag
     
 def get_direction(hidden_states, train_labels, n_difference=2, n_components=2, is_recenter=False):
@@ -72,19 +74,21 @@ def get_signs(hidden_states, directions,train_labels, n_components):
             else:
                 pca_output_min += 1
         signs[component_index] = np.sign(pca_output_max - pca_output_min)
+        if signs[component_index] == 0:
+            signs[component_index] = 1
     
     return signs
 
-def shuffle_all_train_choices(train_data, train_labels, seed):
-    random.seed(seed)
-    shuffled_train_labels = []
-    for i in range(len(train_data)):
-        is_shuffled = random.random() < 0.5
-        if is_shuffled:
-            train_data[i] = train_data[i][::-1]
-            train_labels[i] = train_labels[i][::-1]
-        shuffled_train_labels.append(train_labels[i])
-    return train_data, shuffled_train_labels
+# def shuffle_all_train_choices(train_data, train_labels, seed):
+#     random.seed(seed)
+#     shuffled_train_labels = []
+#     for i in range(len(train_data)):
+#         is_shuffled = random.random() < 0.5
+#         if is_shuffled:
+#             train_data[i] = train_data[i][::-1]
+#             train_labels[i] = train_labels[i][::-1]
+#         shuffled_train_labels.append(train_labels[i])
+#     return train_data, shuffled_train_labels
 
 def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, is_random=True):
     train_emb_true_index = [
@@ -104,13 +108,17 @@ def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, i
         train_emb_false_index = train_emb_false_index[:n_pair]
 
     train_emb_index = []
+    train_emb = []
     for i in range(n_pair):
-        train_emb_index.append([train_emb_true_index[i],train_emb_false_index[i]])
+        train_emb_index.extend([train_emb_true_index[i],train_emb_false_index[i]])
+        # train_emb.append(embeddings[train_emb_true_index[i]])
+        # train_emb.append(embeddings[train_emb_false_index[i]])
     train_labels = [[1, 0]] * n_pair
+    # train_labels = [1, 0] * n_pair
 
     # shuffle emb and labels
-    train_emb_index, train_labels = shuffle_all_train_choices(train_emb_index, train_labels, seed=0)
-    train_emb_index = np.array(train_emb_index).flatten()
+    # train_emb_index, train_labels = shuffle_all_train_choices(train_emb_index, train_labels, seed=0)
+    # train_emb_index = np.array(train_emb_index).flatten()
     # (sample, layer, token, dim)
     train_emb = embeddings[train_emb_index, :, :, :]
     return train_emb, train_labels
@@ -154,7 +162,6 @@ def get_eval_score_of_weighted_directions(hidden_states, directions, signs, impo
         y_score_raw = project_onto_direction(hidden_states, directions[i], H_mean=H_mean) * signs[i]
         y_score_importance += y_score_raw * importances[i]
         result["raw"][i] = get_eval_score_from_prediction(y_score_raw, train_labels, eval_metric)
-        
         result["importance"][i] = get_eval_score_from_prediction(y_score_importance, train_labels, eval_metric)
     return result
 
@@ -184,9 +191,9 @@ def get_project_vectors(train_config, validation_config={}):
     is_recenter = train_config.get("is_recenter", False)
     
     # get train data and validation data
-    train_representations, train_labels = get_representation_labels(train_config)
+    train_representations, train_labels = load_rep_label(train_config)
     if validation_config:
-        validation_representations, validation_labels = get_representation_labels(validation_config)
+        validation_representations, validation_labels = load_rep_label(validation_config)
         train_representations, train_labels = train_representations, train_labels
     else:
         valid_ratio = train_config.get("valid_ratio", 0.1)
@@ -219,17 +226,16 @@ def get_project_vectors(train_config, validation_config={}):
             validation_labels = [1] * n_valid + [0] * n_valid
     # prepare train emb and labels
     train_emb, train_labels = select_train_data(embeddings=train_representations, train_labels=train_labels, high_bound=high_bound, low_bound=low_bound, n_pair=n_pair, is_random=is_random)
-    
     # get directions
     pca_model_dict = {}
     for token in range(token_range[0], token_range[1]):
         pca_model_dict[token] = {}
         for layer in tqdm(range(layer_range[0], layer_range[1])):
             hidden_states = train_emb[:, layer, token, :]
-            
             pca_model_dict[token][layer] = get_direction(
                 hidden_states=hidden_states, train_labels=train_labels, n_difference=n_difference, n_components=n_components, is_recenter=is_recenter
                 )
+            
     # get validation result and collect best directions
     best_result = -10000
     best_directions = {
@@ -257,7 +263,7 @@ def get_project_vectors(train_config, validation_config={}):
     return best_directions
 
 def get_test_result(test_config,directions):
-    representations, labels = get_representation_labels(test_config)
+    representations, labels = load_rep_label(test_config)
     layer, token = directions["layer"], directions["token"]
     hidden_states = representations[:, layer, token, :]
     
@@ -277,20 +283,20 @@ def get_test_result(test_config,directions):
 #%%
 if __name__ == "__main__":
     train_config = {
-        "model_name_or_path": "meta-llama/Meta-Llama-3-8B",
+        "model_name_or_path": "mistralai/Mistral-7B-Instruct-v0.2",
         "eval_type": "absolute",
         "content_file": "data/example.json",
-        "prompt_template": "prompts/entail.txt",
-        "rep_label_dir": "./data/representations/entailment",
+        "prompt_template": "prompts/hyp_only.txt",
+        "rep_label_dir": "./data/representations/example",
         "layer_range": [-32, 0]
     }
     validation_config = train_config
     test_config = {
-        "model_name_or_path": "meta-llama/Meta-Llama-3-8B",
+        "model_name_or_path": "mistralai/Mistral-7B-Instruct-v0.2",
         "eval_type": "absolute",
         "content_file": "data/example.json",
-        "prompt_template": "prompts/entail.txt",
-        "rep_label_dir": "./data/representations/entailment",
+        "prompt_template": "prompts/hyp_only.txt",
+        "rep_label_dir": "./data/representations/example",
         "layer_range": [-32, 0]
     }
     directions = get_project_vectors(train_config, validation_config)
