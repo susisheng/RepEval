@@ -18,6 +18,22 @@ import importlib
 import get_prompt_label
 importlib.reload(get_prompt_label)
 from get_prompt_label import get_prompts_labels
+#%% model & tokenizer type
+model_context_dict = {
+    "mistralai/Mistral-7B-v0.1": 8192,
+    "meta-llama/Llama-2-7b-hf": 4096,
+    "meta-llama/Llama-2-7b-chat-hf": 4096,
+    "chavinlo/alpaca-native": 2048,
+    "eachadea/vicuna-7b-1.1": 2048,
+    "tiiuae/falcon-7b": 2048
+}
+model_template_dict = {
+    # 'mistralai/Mistral-7B-Instruct-v0.2': "Mistral-7B-Instruct-v0.2",
+    "meta-llama/Llama-2-7b-chat-hf": "llama-2",
+    "chavinlo/alpaca-native": "alpaca",
+    "eachadea/vicuna-7b-1.1": "vicuna_v1.1",
+    "tiiuae/falcon-7b": "falcon"
+}
 
 #%% Load model and tokenizer
 def get_model_tokenizer(model_name_or_path, max_length=2048):
@@ -33,12 +49,31 @@ def get_model_tokenizer(model_name_or_path, max_length=2048):
     return model, tokenizer
 
 #%% tokenization
+def get_prompt_input_by_tokenizer(tokenizer, prompt):
+    # identify whether the model is a chat model
+    if tokenizer.name_or_path in model_template_dict:
+        if "system" in tokenizer.chat_template:
+            messages = prompt
+        else:
+            content = " ".join([m["content"] for m in prompt])
+            messages = [
+                {"role": "user", "content": content}
+            ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False)
+    # else concatenate the prompt
+    else:
+        prompt = " ".join([m["content"] for m in prompt])
+    return prompt
+
 def get_tokenized_prompts(tokenizer, prompts, max_length=2048, batch_size=-1):
     tokenized_inputs = []
     exceed_max_length = [False] * len(prompts)
     if batch_size == -1:
         batch_size = len(prompts)
     
+    # process prompts
+    if not isinstance(prompts[0], str):
+        prompts = [get_prompt_input_by_tokenizer(tokenizer, prompt) for prompt in prompts]
     # tokenization
     for i in tqdm(range(0, len(prompts), batch_size)):
         input_texts = prompts[i: i + batch_size]
@@ -131,13 +166,26 @@ def load_rep_label(config, model=None, tokenizer=None):
             return pickle.load(open(rep_file_path, "rb")), labels
         # if could not find embedding.pkl and labels.pkl, try add prompt template and model_name to file path
         else:
-            prompt_template_file = config.get("prompt_template_file", "")
-            prompt_template_name = os.path.basename(prompt_template_file).split(".")[0]
-            rep_label_dir = os.path.join(rep_label_dir, prompt_template_name, model.name_or_path.replace("/", "_"))
+            if config.get("prompt_template_name") is None:
+                prompt_template_file = config.get("prompt_template_file", "")
+                prompt_template_name = os.path.basename(prompt_template_file).split(".")[0]
+            else:
+                prompt_template_name = config["prompt_template_name"]
+            rep_label_dir = os.path.join(rep_label_dir, prompt_template_name, config["model_name_or_path"].replace("/", "_"))
             if not os.path.exists(rep_label_dir):
                 os.makedirs(rep_label_dir)
             rep_file_path = os.path.join(rep_label_dir, "embedding.pkl")
             label_file_path = os.path.join(rep_label_dir, "labels.pkl")
+            
+            if os.path.exists(rep_file_path) and not replace_embedding:
+                print(f"load labels from {label_file_path}...")
+                labels = pickle.load(open(label_file_path, "rb"))
+                if isinstance(labels, list):
+                    labels = np.array(labels)
+                print(f"load embedding from {rep_file_path}...")
+                return pickle.load(open(rep_file_path, "rb")), labels
+            # print the save path
+            print(f"The embedding and labels will be saved to {rep_label_dir}")
     
     # Else, load model and tokenizer
     if model is None or tokenizer is None or model.name_or_path != config["model_name_or_path"]:

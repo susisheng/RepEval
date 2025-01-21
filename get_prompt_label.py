@@ -1,8 +1,13 @@
 from utils import load_file
 
 def load_prompt_template(prompt_template_file):
-    with open(prompt_template_file, "r") as f:
-        prompt_template = f.read()
+    if prompt_template_file.endswith(".txt"):
+        with open(prompt_template_file, "r") as f:
+            prompt_template = f.read()
+    elif prompt_template_file.endswith(".json"):
+        prompt_template = load_file(prompt_template_file)
+    else:
+        raise ValueError("Invalid prompt template file.")
     return prompt_template
 
 def is_prompt_template_valid(eval_type, prompt_template):
@@ -17,10 +22,17 @@ def get_absolute_prompt(prompt_template, contents):
 
 def get_pairwise_prompt(prompt_template, contents):
     """contents contains response_A and response_B. The function switch the order of response_A and response_B and get two prompts. Therefore, in training, make sure A is better than B."""
-    prompt_AB = prompt_template.format(**contents)
-    # switch A and B
-    contents["response_A"], contents["response_B"] = contents["response_B"], contents["response_A"]
-    prompt_BA = prompt_template.format(**contents)
+    if isinstance(prompt_template, str):
+        prompt_AB = prompt_template.format(**contents)
+        # switch A and B
+        contents["response_A"], contents["response_B"] = contents["response_B"], contents["response_A"]
+        prompt_BA = prompt_template.format(**contents)
+    # in chatGLM format
+    elif isinstance(prompt_template, list):
+        prompt_AB = [{"role": prompt["role"], "content": prompt["content"].format(**contents)} for prompt in prompt_template]
+        # switch A and B
+        contents["response_A"], contents["response_B"] = contents["response_B"], contents["response_A"]
+        prompt_BA = [{"role": prompt["role"], "content": prompt["content"].format(**contents)} for prompt in prompt_template]
     return prompt_AB, prompt_BA
 
 def get_single_prompt(eval_type, prompt_template, contents):
@@ -48,8 +60,8 @@ def get_prompts_labels(eval_type, content_file=None, content_list=None, prompt_t
     assert prompt_template is not None or prompt_template_file is not None
     if prompt_template is None:
         prompt_template = load_prompt_template(prompt_template_file)
-    if not is_prompt_template_valid(eval_type, prompt_template):
-        raise ValueError("Prompt template is not valid.")
+    # if not is_prompt_template_valid(eval_type, prompt_template):
+    #     raise ValueError("Prompt template is not valid.")
     
     # Get prompts
     assert content_file is not None or content_list is not None

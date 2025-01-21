@@ -79,7 +79,9 @@ def get_signs(hidden_states, directions,train_labels, n_components):
     
     return signs
 
-def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, is_random=True):
+def select_train_data(eval_type, embeddings, train_labels, n_pair, high_bound=1, low_bound=0, is_random=True):
+    if eval_type == "pairwise":
+        high_bound, low_bound = 1, 0
     train_emb_true_index = [
         i for i, label in enumerate(train_labels) if label >= high_bound]
     train_emb_false_index = [
@@ -88,10 +90,18 @@ def select_train_data(embeddings, train_labels, high_bound, low_bound, n_pair, i
     n_false = len(train_emb_false_index)
     if n_pair > min(n_true, n_false):
         print(f"Warning: n_pair is larger than the number of true or false samples, n_pair is set to {min(n_true, n_false)}")
+    if eval_type == "pairwise":
+        assert n_true == n_false
     
     if is_random:
-        train_emb_true_index = random.sample(train_emb_true_index, n_pair)
-        train_emb_false_index = random.sample(train_emb_false_index, n_pair)
+        if eval_type == "absolute":
+            train_emb_true_index = random.sample(train_emb_true_index, n_pair)
+            train_emb_false_index = random.sample(train_emb_false_index, n_pair)
+        elif eval_type == "pairwise":
+            # make sure the true/false samples of pairwise_eval are in pairs
+            random_index = random.sample(list(range(n_true)), n_pair)
+            train_emb_true_index = [train_emb_true_index[i] for i in random_index]
+            train_emb_false_index = [train_emb_false_index[i] for i in random_index]
     else:
         train_emb_true_index = train_emb_true_index[:n_pair]
         train_emb_false_index = train_emb_false_index[:n_pair]
@@ -127,7 +137,7 @@ def get_eval_score_from_prediction(y_score, train_labels, eval_metric: Union[Lis
             length = len(train_labels) // 2
             score = 0
             for i in range(length):
-                if y_score[i*2] > y_score[i*2+1]:
+                if (train_labels[i*2] > train_labels[i*2+1]) == (y_score[i*2] > y_score[i*2+1]):
                     score += 1
             result[metric] = score / length
     return result
@@ -139,12 +149,13 @@ def get_eval_score_of_single_direction(hidden_states, direction, sign, train_lab
 
 def get_eval_score_of_weighted_directions(hidden_states, directions, signs, importances, train_labels, H_mean=None,eval_metric: Union[List[str], str] = "spearmanr"):
     y_score_importance = np.zeros(len(hidden_states))
-    result = {"raw":{}, "importance": {}}
+    # result = {"raw":{}, "importance": {}}
+    result = {"raw":{}}
     for i in range(len(directions)):
         y_score_raw = project_onto_direction(hidden_states, directions[i], H_mean=H_mean) * signs[i]
-        y_score_importance += y_score_raw * importances[i]
+        # y_score_importance += y_score_raw * importances[i]
         result["raw"][i] = get_eval_score_from_prediction(y_score_raw, train_labels, eval_metric)
-        result["importance"][i] = get_eval_score_from_prediction(y_score_importance, train_labels, eval_metric)
+        # result["importance"][i] = get_eval_score_from_prediction(y_score_importance, train_labels, eval_metric)
     return result
 
 #%%
@@ -166,6 +177,8 @@ def get_project_vectors(train_config, validation_config={}):
     high_bound = train_config.get("high_bound", 1)
     low_bound = train_config.get("low_bound", 0)
     is_random = train_config.get("is_random", True)
+    if eval_type == "pairwise":
+        high_bound, low_bound = 1,0
     
     # setting for pca
     n_difference = train_config.get("n_difference", 2)
@@ -173,41 +186,46 @@ def get_project_vectors(train_config, validation_config={}):
     is_recenter = train_config.get("is_recenter", False)
     
     # get train data and validation data
-    train_representations, train_labels = load_rep_label(train_config)
     if validation_config:
+        train_representations, train_labels = load_rep_label(train_config)
         validation_representations, validation_labels = load_rep_label(validation_config)
-        train_representations, train_labels = train_representations, train_labels
     else:
+        representations, labels = load_rep_label(train_config)
         valid_ratio = train_config.get("valid_ratio", 0.1)
         n_sample = len(train_representations)
         if eval_type == "pairwise":
             n_sample = n_sample // 2
-        n_valid = int(n_sample * valid_ratio)
-        valid_index = random.sample(range(n_sample), n_valid)
-        train_index = list(set(range(n_sample)) - set(valid_index))
         
         # split train and validation data
         seed = train_config.get("seed", 0)
         random.seed(seed)
+        n_valid = int(n_sample * valid_ratio)
+        valid_index = random.sample(range(n_sample), n_valid)
+        train_index = list(set(range(n_sample)) - set(valid_index))
+        
         if eval_type == "absolute":
-            train_representations = train_representations[train_index]
-            train_labels = train_labels[train_index]
-            validation_representations = train_representations[valid_index]
-            validation_labels = train_labels[valid_index]
+            train_representations = representations[train_index]
+            train_labels = labels[train_index]
+            validation_representations = representations[valid_index]
+            validation_labels = labels[valid_index]
         elif eval_type == "pairwise":
             # train data
             train_representations = []
+            train_labels = []
             for i in train_index:
                 train_representations.extend([train_representations[i * 2], train_representations[i * 2 + 1]])
-            train_labels = [1] * n_valid + [0] * n_valid
+                train_labels.extend([labels[i * 2], labels[i * 2 + 1]])
             
             # validation data
             validation_representations = []
+            validation_labels = []
             for i in valid_index:
                 validation_representations.extend([train_representations[i * 2], train_representations[i * 2 + 1]])
-            validation_labels = [1] * n_valid + [0] * n_valid
+                validation_labels.extend([labels[i * 2], labels[i * 2 + 1]])
+
     # prepare train emb and labels
-    train_emb, train_labels = select_train_data(embeddings=train_representations, train_labels=train_labels, high_bound=high_bound, low_bound=low_bound, n_pair=n_pair, is_random=is_random)
+    train_emb, train_labels = select_train_data(eval_type, embeddings=train_representations, train_labels=train_labels, high_bound=high_bound, low_bound=low_bound, n_pair=n_pair, is_random=is_random)
+    
     # get directions
     pca_model_dict = {}
     for token in range(token_range[0], token_range[1]):
@@ -234,14 +252,20 @@ def get_project_vectors(train_config, validation_config={}):
             validate_result = get_eval_score_of_weighted_directions(
                 hidden_states=hidden_states, directions=pca_model[0], signs=pca_model[1], importances=pca_model[2], train_labels=validation_labels, eval_metric=[eval_metric], H_mean=pca_model[3]
                 )
-            if validate_result["importance"][0][eval_metric] > best_result:
-                best_result = validate_result["importance"][0][eval_metric]
-                best_directions["directions"] = pca_model[0]
-                best_directions["signs"] = pca_model[1]
-                best_directions["importances"] = pca_model[2]
-                best_directions["layer"] = layer
-                best_directions["token"] = token
-            
+            for vector_type in ["raw"]:
+                for vector_num in range(n_components):
+                    if validate_result[vector_type][vector_num][eval_metric] > best_result:
+                        best_result = validate_result[vector_type][vector_num][eval_metric]
+                        if vector_type == "raw":
+                            best_directions["directions"] = [pca_model[0][vector_num]]
+                        best_directions["signs"] = [pca_model[1][vector_num]]
+                        best_directions["importances"] = [pca_model[2][vector_num]]
+                        best_directions["layer"] = layer
+                        best_directions["token"] = token
+                        best_directions["vector_type"] = vector_type
+                        best_directions["vector_num"] = vector_num
+                        best_directions["valid_score"] = validate_result[vector_type][vector_num][eval_metric]
+        
     return best_directions
 
 def get_test_result(test_config,directions):
