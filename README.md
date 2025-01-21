@@ -1,4 +1,4 @@
-# NLG Evaluation
+# RepEval
 This is the official repository for the paper "RepEval: Effective Text Evaluation with LLM Representation" by Shuqian Sheng, Yi Xu, Tianhang Zhang, Zanwei Shen, Luoyi Fu, Jiaxin Ding, Lei Zhou, Xiaoying Gan, Xinbing Wang, Chenghu Zhou. 
 
 ## Citation
